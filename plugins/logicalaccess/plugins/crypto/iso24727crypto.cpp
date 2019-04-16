@@ -170,6 +170,28 @@ static bool apdu_has_data(const ByteVector &apdu)
     return body_size >= apdu[4] + 1; // Maybe we also have an LE byte.
 }
 
+inline void write_size(ByteVector &out, uint64_t size)
+{
+    if (size < 128)
+    {
+        out.push_back(static_cast<uint8_t>(size));
+    }
+    else if (size < 256)
+    {
+        // out.push_back(128 | 1); // Length is encoded over 1 byte.
+        out.push_back(0x81);
+        out.push_back(static_cast<uint8_t>(size));
+    }
+    // else if (size < 65535) {
+    //   out.push_back(0x82);
+    //  out.push_back(static_cast<uint8_t>(size >> ));
+    //}
+    else
+    {
+        assert(0);
+    }
+}
+
 ByteVector ISO24727Crypto::encrypt_apdu(std::shared_ptr<openssl::SymmetricCipher> cipher,
                                         const ByteVector &apdu, const ByteVector &ks_enc,
                                         const ByteVector &ks_mac, const ByteVector &ssc)
@@ -210,11 +232,16 @@ ByteVector ISO24727Crypto::encrypt_apdu(std::shared_ptr<openssl::SymmetricCipher
         // Even INS code uses DO87, while odd uses DO85.
         if (apdu.at(1) % 2 == 0)
         {
-            do_85_or_87 = {0x87, static_cast<uint8_t>(encrypted_data.size() + 1), 0x01};
+            do_85_or_87 = {0x87};
+            write_size(do_85_or_87, encrypted_data.size() + 1);
+            do_85_or_87.push_back(0x01);
+            //, static_cast<uint8_t>(encrypted_data.size() + 1), 0x01};
         }
         else
         {
-            do_85_or_87 = {0x85, static_cast<uint8_t>(encrypted_data.size())};
+            do_85_or_87 = {0x85};
+            write_size(do_85_or_87, encrypted_data.size());
+            //, static_cast<uint8_t>(encrypted_data.size())};
         }
         do_85_or_87.insert(do_85_or_87.end(), encrypted_data.begin(),
                            encrypted_data.end());
@@ -232,8 +259,11 @@ ByteVector ISO24727Crypto::encrypt_apdu(std::shared_ptr<openssl::SymmetricCipher
 
     ByteVector result;
     result.insert(result.end(), cmd_header_nopad.begin(), cmd_header_nopad.end());
+    std::cout << "Size: " << do_85_or_87.size() + do_97.size() + do_8E.size() << std::endl;
+    assert(do_85_or_87.size() + do_97.size() + do_8E.size() < 255);
     result.push_back(
         static_cast<uint8_t>(do_85_or_87.size() + do_97.size() + do_8E.size())); // LC
+
     result.insert(result.end(), do_85_or_87.begin(), do_85_or_87.end());
     result.insert(result.end(), do_97.begin(), do_97.end());
     result.insert(result.end(), do_8E.begin(), do_8E.end());
@@ -341,14 +371,16 @@ ByteVector ISO24727Crypto::decrypt_rapdu(std::shared_ptr<openssl::SymmetricCiphe
         CC = compute_mac(cipher, pad(K, cipher->getBlockSize()), ks_mac, {}, ssc);
     else
         CC = compute_mac(cipher, pad(K, cipher->getBlockSize()), ks_mac);
+    std::cout << "CC = " << CC << ". do_8E = " << do_8E << std::endl;
     EXCEPTION_ASSERT_WITH_LOG(CC == ByteVector(do_8E.begin() + 2, do_8E.end()),
                               LibLogicalAccessException, "Checksum doesn't match");
 
     ByteVector decrypted_data;
     if (!do85_or_do87.empty())
     {
+        int size_len = *(do85_or_do87.begin() + 1) & 0x80 ? 1 + (*(do85_or_do87.begin() + 1) & ~0x80) : 1;
         cipher->decipher(
-            ByteVector(do85_or_do87.begin() + 2 + is_do_87, do85_or_do87.end()),
+            ByteVector(do85_or_do87.begin() + 1 + size_len + is_do_87, do85_or_do87.end()),
             decrypted_data, openssl::SymmetricKey(ks_enc));
         decrypted_data = unpad(decrypted_data);
     }
